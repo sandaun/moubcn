@@ -1030,6 +1030,7 @@ export function MapAdapter({
             color={lineBrand.backgroundColor}
             iconColor={lineBrand.textColor}
             updatedAt={transitVehiclesUpdatedAt}
+            selected={vehicle.id === selectedVehicleId}
             onPress={() => handleVehiclePress(vehicle.id)}
           />
         ))}
@@ -1302,6 +1303,7 @@ function VehicleMarker({
   color,
   iconColor,
   updatedAt,
+  selected,
   onPress,
 }: {
   accessibilityLabel: string;
@@ -1310,6 +1312,7 @@ function VehicleMarker({
   color: string;
   iconColor: string;
   updatedAt: number;
+  selected: boolean;
   onPress: () => void;
 }) {
   const styles = useThemedStyles(createStyles);
@@ -1371,6 +1374,20 @@ function VehicleMarker({
       <View style={styles.vehicleMarkerBox}>
         <RNAnimated.View pointerEvents="none" style={ringStyle(firstRing)} />
         <RNAnimated.View pointerEvents="none" style={ringStyle(secondRing)} />
+        {/* The detail card sits at the bottom of the screen, so the halo is what
+            ties it to this particular train rather than proximity. */}
+        {selected ? (
+          <View
+            pointerEvents="none"
+            style={[
+              styles.vehicleSelectedHalo,
+              {
+                backgroundColor: withAlpha(color, 0.22),
+                borderColor: withAlpha(color, 0.75),
+              },
+            ]}
+          />
+        ) : null}
         {bearingDegrees !== null ? (
           <View
             pointerEvents="none"
@@ -1698,13 +1715,25 @@ const createStyles = (palette: Palette) => StyleSheet.create({
     borderRightColor: 'transparent',
     borderBottomColor: '#FFFFFF',
   },
+  // Centred in the 60 pt marker box, behind the tile.
+  vehicleSelectedHalo: {
+    position: 'absolute',
+    top: 10.5,
+    left: 10.5,
+    width: 39,
+    height: 39,
+    borderRadius: 15,
+    borderWidth: 1.5,
+  },
   // A rounded tile, deliberately not a circle: every station annotation on the
   // map is a white-ringed disc, and a disc-shaped vehicle at a station read as
-  // a second station rather than as a train.
+  // a second station rather than as a train. The radius stays close to circular
+  // so the orbiting heading tip keeps an even gap at every angle — a squarer
+  // corner reaches further from the centre than the middle of an edge does.
   vehicleMarker: {
     width: 27,
     height: 27,
-    borderRadius: 8,
+    borderRadius: 11,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 2.5,
