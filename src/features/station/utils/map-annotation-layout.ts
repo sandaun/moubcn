@@ -16,6 +16,16 @@ export interface MapAnnotationViewport {
   longitudeDelta: number;
 }
 
+/**
+ * A non-station annotation that station labels must yield to — currently the
+ * live vehicle markers, which are drawn above every station annotation and so
+ * would otherwise sit on top of a name instead of displacing it.
+ */
+export interface MapAnnotationObstacle {
+  lat: number;
+  lon: number;
+}
+
 interface AnnotationRect {
   left: number;
   right: number;
@@ -33,6 +43,9 @@ const SELECTED_NAME_HALF_WIDTH = 84;
 const UNSELECTED_NAME_BOTTOM_OFFSET = 58;
 const SELECTED_NAME_BOTTOM_OFFSET = 82;
 const COLLISION_GAP = 6;
+// The visible vehicle disc, not its 60 pt marker box: most of that box is the
+// translucent pulse ring, which labels may safely overlap.
+const VEHICLE_RADIUS = 16;
 
 function isValidViewport(viewport: MapAnnotationViewport): boolean {
   return (
@@ -49,16 +62,39 @@ function isValidViewport(viewport: MapAnnotationViewport): boolean {
   );
 }
 
+function projectX(lon: number, viewport: MapAnnotationViewport): number {
+  return (
+    viewport.width / 2 + ((lon - viewport.longitude) / viewport.longitudeDelta) * viewport.width
+  );
+}
+
+function projectY(lat: number, viewport: MapAnnotationViewport): number {
+  return (
+    viewport.height / 2 - ((lat - viewport.latitude) / viewport.latitudeDelta) * viewport.height
+  );
+}
+
+function getObstacleRect(
+  obstacle: MapAnnotationObstacle,
+  viewport: MapAnnotationViewport,
+): AnnotationRect {
+  const x = projectX(obstacle.lon, viewport);
+  const y = projectY(obstacle.lat, viewport);
+
+  return {
+    left: x - VEHICLE_RADIUS,
+    right: x + VEHICLE_RADIUS,
+    top: y - VEHICLE_RADIUS,
+    bottom: y + VEHICLE_RADIUS,
+  };
+}
+
 function getAnnotationRect(
   candidate: StationAnnotationCandidate,
   viewport: MapAnnotationViewport,
 ): AnnotationRect {
-  const x =
-    viewport.width / 2 +
-    ((candidate.station.lon - viewport.longitude) / viewport.longitudeDelta) * viewport.width;
-  const y =
-    viewport.height / 2 -
-    ((candidate.station.lat - viewport.latitude) / viewport.latitudeDelta) * viewport.height;
+  const x = projectX(candidate.station.lon, viewport);
+  const y = projectY(candidate.station.lat, viewport);
   let left = x - MARKER_RADIUS;
   let right = x + MARKER_RADIUS;
   let top = y - MARKER_RADIUS;
@@ -105,6 +141,7 @@ function intersectsViewport(rect: AnnotationRect, viewport: MapAnnotationViewpor
 export function getVisibleStationAnnotationCodes(
   candidates: StationAnnotationCandidate[],
   viewport: MapAnnotationViewport,
+  obstacles: MapAnnotationObstacle[] = [],
 ): Set<string> {
   const seenCodes = new Set<string>();
   const uniqueCandidates = candidates.filter((candidate) => {
@@ -133,10 +170,24 @@ export function getVisibleStationAnnotationCodes(
     );
   const visibleCodes = new Set<string>();
   const occupiedRects: AnnotationRect[] = [];
+  const obstacleRects = obstacles
+    .filter(
+      (obstacle) => Number.isFinite(obstacle.lat) && Number.isFinite(obstacle.lon),
+    )
+    .map((obstacle) => getObstacleRect(obstacle, viewport));
 
   for (const { candidate } of orderedCandidates) {
     const rect = getAnnotationRect(candidate, viewport);
     if (!intersectsViewport(rect, viewport)) {
+      continue;
+    }
+
+    // The selected station keeps its label whatever is on top of it; it is the
+    // one annotation the user explicitly asked for.
+    if (
+      !candidate.selected &&
+      obstacleRects.some((obstacleRect) => intersects(rect, obstacleRect))
+    ) {
       continue;
     }
 
