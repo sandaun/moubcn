@@ -134,7 +134,7 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
     if (!flight) {
       flight = getFgcVehicles(query.lineCode)
         .then((vehicles) => {
-          vehicleCache.set(key, vehicles, runtimeConfig.realtimeCacheTtlMs);
+          vehicleCache.set(key, vehicles, runtimeConfig.vehiclesCacheTtlMs);
           return vehicles;
         })
         .finally(() => {
@@ -146,7 +146,7 @@ export const realtimeRoutes: FastifyPluginAsync = async (fastify) => {
     try {
       return { data: await flight, meta: { source: 'fgc-geotren', stale: false } };
     } catch (error) {
-      const stale = vehicleCache.getStale(key, runtimeConfig.realtimeStaleMaxMs);
+      const stale = vehicleCache.getStale(key, runtimeConfig.vehiclesStaleMaxMs);
       if (stale) {
         return { data: stale, meta: { source: 'stale-cache', stale: true } };
       }

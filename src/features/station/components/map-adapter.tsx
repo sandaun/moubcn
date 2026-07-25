@@ -1,6 +1,6 @@
 // The vehicle marker uses the MaterialIcons glyph font directly instead of
-// IconSymbol: SF Symbols render as a native view, which is unreliable when
-// react-native-maps rasterises a marker with tracksViewChanges disabled.
+// IconSymbol: SF Symbols render as a native view, which Android rasterises
+// unreliably inside a marker bitmap. A glyph is safe on both platforms.
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import * as Location from 'expo-location';
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -19,11 +19,9 @@ import Animated, {
   useAnimatedStyle,
 } from 'react-native-reanimated';
 import MapView, {
-  Callout,
   Marker,
   Polyline,
   type LatLng,
-  type MapMarker,
   type MapPressEvent,
   type Region,
   type UserLocationChangeEvent,
@@ -46,6 +44,7 @@ import {
 } from '@/src/features/station/utils/station-interchanges';
 import {
   getVisibleStationAnnotationCodes,
+  type MapAnnotationObstacle,
   type StationAnnotationCandidate,
 } from '@/src/features/station/utils/map-annotation-layout';
 import { getMapMarkerDetail } from '@/src/features/station/utils/map-marker-detail';
@@ -175,15 +174,47 @@ const UNSELECTED_STATION_NAME_CENTER_OFFSET = { x: 0, y: 22 };
 const STATION_NAME_CENTER_OFFSET = { x: 0, y: 26 };
 const SELECTED_STATION_NAME_CENTER_OFFSET = { x: 0, y: 30 };
 const SELECTED_MULTILINE_STATION_NAME_CENTER_OFFSET = { x: 0, y: 38 };
+// Places the detail above the vehicle tile: iOS positions custom annotations by
+// centerOffset alone, so this clears half the 27 pt tile plus half the card.
+const VEHICLE_DETAIL_ANCHOR = { x: 0.5, y: 1 };
+const VEHICLE_DETAIL_CENTER_OFFSET = { x: 0, y: -48 };
 const STATION_MARKER_IMAGE = require('@/assets/map/station-marker.png') as ImageRequireSource;
 // Beyond this the reported position is not plausibly the drawn route, so the
 // raw coordinate is kept instead of snapping onto an unrelated stretch.
 const VEHICLE_SNAP_MAX_DISTANCE_METERS = 150;
-const VEHICLE_MOVE_ANIMATION_MS = 900;
-// Two slow sonar rings per data refresh read as a heartbeat while keeping the
-// expensive tracksViewChanges window bounded (~2 s out of every poll cycle).
+// Two slow sonar rings per movement read as a heartbeat without turning the
+// marker into a permanent animation.
 const VEHICLE_PULSE_RING_MS = 1_600;
 const VEHICLE_PULSE_STAGGER_MS = 500;
+// How long a map press is still treated as the echo of the vehicle press that
+// produced it, rather than as a tap on empty map meaning "dismiss".
+const VEHICLE_PRESS_ECHO_MS = 350;
+
+// AIRMapMarker feeds zIndex straight into MKAnnotationView.zPriority, which
+// runs 0…1000 with DefaultUnselected at 500. Below that default MapKit stays
+// free to order annotations its own way — by latitude — which is why the
+// vehicle marker kept drawing under station labels only *sometimes*. Keeping
+// the whole scale above 500 leaves relative order as the only thing MapKit has
+// to honour. Defined in one place so a stray literal cannot reorder the map.
+const MAP_Z_BASE = 600;
+const MAP_Z = {
+  routeBehindPlanner: MAP_Z_BASE + 1,
+  route: MAP_Z_BASE + 5,
+  nearbyStop: MAP_Z_BASE + 8,
+  nearbyStopLabel: MAP_Z_BASE + 9,
+  station: MAP_Z_BASE + 10,
+  stationSelected: MAP_Z_BASE + 20,
+  stationBadge: MAP_Z_BASE + 30,
+  stationName: MAP_Z_BASE + 35,
+  stationNameSelected: MAP_Z_BASE + 40,
+  plannerRoute: MAP_Z_BASE + 45,
+  vehicle: MAP_Z_BASE + 55,
+  vehicleDetail: MAP_Z_BASE + 58,
+  plannerStation: MAP_Z_BASE + 60,
+  plannerBadge: MAP_Z_BASE + 65,
+  plannerName: MAP_Z_BASE + 70,
+  plannerEndpoint: MAP_Z_BASE + 75,
+} as const;
 
 export function MapAdapter({
   lineCode,
@@ -258,6 +289,17 @@ export function MapAdapter({
   const userLocationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [userCoordinate, setUserCoordinate] = useState<LatLng | null>(null);
   const [visibleRegion, setVisibleRegion] = useState<Region | null>(null);
+  // The vehicle detail is a plain overlay rather than a MapKit Callout. A
+  // Callout is presented *inside* the annotation view, and AIRMapMarker then
+  // resizes itself from its largest subview — which tore the marker's own
+  // content apart and dismissed the bubble on the spot.
+  const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
+  // A marker tap does not consume the touch (AIRMapMarker sets
+  // cancelsTouchesInView = NO so the map keeps receiving selection events), so
+  // pressing a vehicle also fires the map's own press. Both orderings are safe:
+  // if the marker lands first the map press is ignored as an echo, and if the
+  // map lands first it clears nothing the marker has not yet set.
+  const lastVehiclePressAtRef = useRef(0);
   const selectedStation = stations.find(
     (station) => station.code === selectedStationCode,
   );
@@ -443,6 +485,127 @@ export function MapAdapter({
       }),
     [interchangeByStationKey, lineCode, markerDetail, markerStations, selectedStationCode],
   );
+  const routePolylines = useMemo<RoutePolyline[]>(() => {
+    if (!explorationVisible) {
+      return [];
+    }
+
+    const segmentPolylines = segments
+      .filter((segment) => segment.lineCode === lineCode)
+      .map((segment) => ({
+        id: `segment:${segment.id}`,
+        coordinates: trimSegmentToStations(segment, stations)
+          .map(toMapCoordinate)
+          .filter(hasFiniteCoordinate),
+      }))
+      .filter((polyline) => polyline.coordinates.length > 1);
+
+    if (segmentPolylines.length > 0) {
+      return segmentPolylines;
+    }
+
+    const fallbackPolyline = getFallbackPolyline(stations);
+    return fallbackPolyline ? [fallbackPolyline] : [];
+  }, [explorationVisible, lineCode, segments, stations]);
+  // Vehicles belong to the line being explored, so they are hidden alongside
+  // its route and stations while the planner owns the map. They also feed the
+  // annotation layout below, which is why they are placed this early.
+  const placedVehicles = useMemo(() => {
+    if (!explorationVisible) {
+      return [];
+    }
+
+    const routeGeometry = routePolylines.map((polyline) =>
+      polyline.coordinates.map((coordinate) => ({
+        lat: coordinate.latitude,
+        lon: coordinate.longitude,
+      })),
+    );
+    const stationByCode = new Map(stations.map((station) => [station.code, station]));
+
+    return transitVehicles
+      .filter((vehicle) => Number.isFinite(vehicle.lat) && Number.isFinite(vehicle.lon))
+      .map((vehicle) => {
+        // The feed lists upcoming stops in travel order using catalog station
+        // codes, so the first one orients the vehicle along the route.
+        const nextStop = vehicle.nextStops.length
+          ? stationByCode.get(vehicle.nextStops[0])
+          : undefined;
+        const placement = placePointOnPolylines(
+          routeGeometry,
+          { lat: vehicle.lat, lon: vehicle.lon },
+          nextStop && Number.isFinite(nextStop.lat) && Number.isFinite(nextStop.lon)
+            ? { lat: nextStop.lat, lon: nextStop.lon }
+            : null,
+          VEHICLE_SNAP_MAX_DISTANCE_METERS,
+        );
+
+        return {
+          vehicle,
+          // The feed reports the destination as a catalog station code, which is
+          // not something to put in front of a user.
+          destinationName: vehicle.destination
+            ? stationByCode.get(vehicle.destination)?.name ?? vehicle.destination
+            : undefined,
+          coordinate: {
+            latitude: placement.point.lat,
+            longitude: placement.point.lon,
+          },
+          bearingDegrees: placement.bearingDegrees,
+        };
+      });
+  }, [explorationVisible, routePolylines, stations, transitVehicles]);
+  const selectedVehicle = placedVehicles.find(
+    ({ vehicle }) => vehicle.id === selectedVehicleId,
+  );
+
+  // Drop the detail when its train leaves the feed, changes line, or the
+  // planner takes over, so the card can never outlive the marker it describes.
+  useEffect(() => {
+    if (selectedVehicleId !== null && !selectedVehicle) {
+      setSelectedVehicleId(null);
+    }
+  }, [selectedVehicle, selectedVehicleId]);
+
+  // Deliberately not memoised: the age has to be recomputed on every render so
+  // it stays honest between polls. Nothing here is expensive.
+  const selectedVehicleMeta = (() => {
+    if (!selectedVehicle) {
+      return '';
+    }
+
+    const { isOnTime, occupancyPercent } = selectedVehicle.vehicle;
+    const parts: string[] = [];
+
+    if (isOnTime !== undefined) {
+      parts.push(t(isOnTime ? 'vehicle_on_time' : 'vehicle_delayed'));
+    }
+    if (occupancyPercent !== undefined) {
+      parts.push(t('vehicle_occupancy', { percent: Math.round(occupancyPercent) }));
+    }
+    if (transitVehiclesUpdatedAt > 0) {
+      const ageSeconds = Math.max(
+        0,
+        Math.round((Date.now() - transitVehiclesUpdatedAt) / 1_000),
+      );
+      parts.push(
+        ageSeconds < 60
+          ? t('vehicle_age_seconds', { seconds: ageSeconds })
+          : t('vehicle_age_minutes', { minutes: Math.round(ageSeconds / 60) }),
+      );
+    }
+
+    return parts.join(' · ');
+  })();
+
+  const vehicleObstacles = useMemo<MapAnnotationObstacle[]>(
+    () =>
+      placedVehicles.map(({ coordinate }) => ({
+        lat: coordinate.latitude,
+        lon: coordinate.longitude,
+      })),
+    [placedVehicles],
+  );
   const annotationCandidates = useMemo<StationAnnotationCandidate[]>(() => {
     const candidatesByCode = new Map<string, StationAnnotationCandidate>();
 
@@ -469,14 +632,18 @@ export function MapAdapter({
   }, [badgeStations, namedStations, selectedStationCode]);
   const visibleAnnotationCodes = useMemo(
     () =>
-      getVisibleStationAnnotationCodes(annotationCandidates, {
-        width: mapWidth,
-        height: mapHeight,
-        latitude: visibleRegion?.latitude ?? selectedStation?.lat ?? 41.3851,
-        longitude: visibleRegion?.longitude ?? selectedStation?.lon ?? 2.1734,
-        latitudeDelta,
-        longitudeDelta,
-      }),
+      getVisibleStationAnnotationCodes(
+        annotationCandidates,
+        {
+          width: mapWidth,
+          height: mapHeight,
+          latitude: visibleRegion?.latitude ?? selectedStation?.lat ?? 41.3851,
+          longitude: visibleRegion?.longitude ?? selectedStation?.lon ?? 2.1734,
+          latitudeDelta,
+          longitudeDelta,
+        },
+        vehicleObstacles,
+      ),
     [
       annotationCandidates,
       latitudeDelta,
@@ -484,6 +651,7 @@ export function MapAdapter({
       mapHeight,
       mapWidth,
       selectedStation,
+      vehicleObstacles,
       visibleRegion,
     ],
   );
@@ -681,69 +849,21 @@ export function MapAdapter({
   const handleMapPress = useCallback(
     (event: MapPressEvent) => {
       const coordinate = event.nativeEvent.coordinate;
+      if (Date.now() - lastVehiclePressAtRef.current > VEHICLE_PRESS_ECHO_MS) {
+        setSelectedVehicleId(null);
+      }
       onMapPress?.({ lat: coordinate.latitude, lon: coordinate.longitude });
     },
     [onMapPress],
   );
 
-  const routePolylines = useMemo<RoutePolyline[]>(() => {
-    if (!explorationVisible) {
-      return [];
-    }
+  // Pressing the same train again closes the card, which together with a press
+  // on empty map is why it needs no close button of its own.
+  const handleVehiclePress = useCallback((vehicleId: string) => {
+    lastVehiclePressAtRef.current = Date.now();
+    setSelectedVehicleId((current) => (current === vehicleId ? null : vehicleId));
+  }, []);
 
-    const segmentPolylines = segments
-      .filter((segment) => segment.lineCode === lineCode)
-      .map((segment) => ({
-        id: `segment:${segment.id}`,
-        coordinates: trimSegmentToStations(segment, stations)
-          .map(toMapCoordinate)
-          .filter(hasFiniteCoordinate),
-      }))
-      .filter((polyline) => polyline.coordinates.length > 1);
-
-    if (segmentPolylines.length > 0) {
-      return segmentPolylines;
-    }
-
-    const fallbackPolyline = getFallbackPolyline(stations);
-    return fallbackPolyline ? [fallbackPolyline] : [];
-  }, [explorationVisible, lineCode, segments, stations]);
-  const placedVehicles = useMemo(() => {
-    const routeGeometry = routePolylines.map((polyline) =>
-      polyline.coordinates.map((coordinate) => ({
-        lat: coordinate.latitude,
-        lon: coordinate.longitude,
-      })),
-    );
-    const stationByCode = new Map(stations.map((station) => [station.code, station]));
-
-    return transitVehicles
-      .filter((vehicle) => Number.isFinite(vehicle.lat) && Number.isFinite(vehicle.lon))
-      .map((vehicle) => {
-        // The feed lists upcoming stops in travel order using catalog station
-        // codes, so the first one orients the vehicle along the route.
-        const nextStop = vehicle.nextStops.length
-          ? stationByCode.get(vehicle.nextStops[0])
-          : undefined;
-        const placement = placePointOnPolylines(
-          routeGeometry,
-          { lat: vehicle.lat, lon: vehicle.lon },
-          nextStop && Number.isFinite(nextStop.lat) && Number.isFinite(nextStop.lon)
-            ? { lat: nextStop.lat, lon: nextStop.lon }
-            : null,
-          VEHICLE_SNAP_MAX_DISTANCE_METERS,
-        );
-
-        return {
-          vehicle,
-          coordinate: {
-            latitude: placement.point.lat,
-            longitude: placement.point.lon,
-          },
-          bearingDegrees: placement.bearingDegrees,
-        };
-      });
-  }, [routePolylines, stations, transitVehicles]);
   const routeLayerKey = routePolylines
     .map((polyline) => `${polyline.id}:${polyline.coordinates.length}`)
     .join('|');
@@ -753,7 +873,7 @@ export function MapAdapter({
     ? withAlpha(lineBrand.backgroundColor, 0.22)
     : lineBrand.backgroundColor;
   const routeStrokeWidth = hasPlannerRoute ? 3 : 5;
-  const routeZIndex = hasPlannerRoute ? 1 : 5;
+  const routeZIndex = hasPlannerRoute ? MAP_Z.routeBehindPlanner : MAP_Z.route;
 
   return (
     <View
@@ -809,7 +929,7 @@ export function MapAdapter({
               lineJoin="round"
               strokeWidth={6}
               strokeColor={polyline.color}
-              zIndex={45 + index}
+              zIndex={MAP_Z.plannerRoute + index}
             />
           );
         })}
@@ -825,7 +945,7 @@ export function MapAdapter({
               coordinate={{ latitude: station.lat, longitude: station.lon }}
               image={isSelected ? undefined : STATION_MARKER_IMAGE}
               tracksViewChanges={isSelected}
-              zIndex={isSelected ? 20 : 10}
+              zIndex={isSelected ? MAP_Z.stationSelected : MAP_Z.station}
               onPress={() => handleStationPress(station.code)}
             >
               {isSelected ? (
@@ -866,7 +986,7 @@ export function MapAdapter({
               centerOffset={STATION_MARKER_CENTER_OFFSET}
               coordinate={{ latitude: station.lat, longitude: station.lon }}
               tracksViewChanges={false}
-              zIndex={30}
+              zIndex={MAP_Z.stationBadge}
               onPress={() => handleStationPress(station.code)}
             >
               <StationTransferBadges
@@ -899,7 +1019,7 @@ export function MapAdapter({
             centerOffset={STATION_MARKER_CENTER_OFFSET}
             coordinate={{ latitude: stop.lat, longitude: stop.lon }}
             tracksViewChanges={false}
-            zIndex={8}
+            zIndex={MAP_Z.nearbyStop}
             onPress={() => onNearbyStopPress?.(stop)}
           >
             <NearbyStopDot mode={stop.mode} lineCode={stop.lineCode} lineColor={stop.lineColor} />
@@ -915,30 +1035,9 @@ export function MapAdapter({
             color={lineBrand.backgroundColor}
             iconColor={lineBrand.textColor}
             updatedAt={transitVehiclesUpdatedAt}
-          >
-            <Callout tooltip>
-              <View style={styles.vehicleCallout}>
-                <Text style={styles.vehicleCalloutTitle}>
-                  {vehicle.lineCode}{vehicle.destination ? ` → ${vehicle.destination}` : ''}
-                </Text>
-                {vehicle.isOnTime !== undefined ? (
-                  <Text style={styles.vehicleCalloutText}>
-                    {t(vehicle.isOnTime ? 'vehicle_on_time' : 'vehicle_delayed')}
-                  </Text>
-                ) : null}
-                {vehicle.occupancyPercent !== undefined ? (
-                  <Text style={styles.vehicleCalloutText}>
-                    {t('vehicle_occupancy', { percent: Math.round(vehicle.occupancyPercent) })}
-                  </Text>
-                ) : null}
-                {vehicle.nextStops.length ? (
-                  <Text style={styles.vehicleCalloutText} numberOfLines={2}>
-                    {t('vehicle_next_stops', { stops: vehicle.nextStops.slice(0, 3).join(', ') })}
-                  </Text>
-                ) : null}
-              </View>
-            </Callout>
-          </VehicleMarker>
+            selected={vehicle.id === selectedVehicleId}
+            onPress={() => handleVehiclePress(vehicle.id)}
+          />
         ))}
 
         {latitudeDelta <= 0.02
@@ -949,7 +1048,7 @@ export function MapAdapter({
                 centerOffset={STATION_NAME_CENTER_OFFSET}
                 coordinate={{ latitude: stop.lat, longitude: stop.lon }}
                 tracksViewChanges={false}
-                zIndex={9}
+                zIndex={MAP_Z.nearbyStopLabel}
                 onPress={() => onNearbyStopPress?.(stop)}
               >
                 <NearbyStopLabel
@@ -979,7 +1078,7 @@ export function MapAdapter({
                 centerOffset={STATION_MARKER_CENTER_OFFSET}
                 coordinate={coordinate}
                 tracksViewChanges={false}
-                zIndex={75}
+                zIndex={MAP_Z.plannerEndpoint}
                 onPress={handlePress}
               >
                 <PlannerEndpointMarker marker={marker} />
@@ -1012,7 +1111,7 @@ export function MapAdapter({
                 coordinate={coordinate}
                 image={usesDynamicSelectedMarker ? undefined : STATION_MARKER_IMAGE}
                 tracksViewChanges={usesDynamicSelectedMarker}
-                zIndex={60}
+                zIndex={MAP_Z.plannerStation}
                 onPress={handlePress}
               >
                 {usesDynamicSelectedMarker ? (
@@ -1026,7 +1125,7 @@ export function MapAdapter({
                   centerOffset={STATION_MARKER_CENTER_OFFSET}
                   coordinate={coordinate}
                   tracksViewChanges={false}
-                  zIndex={65}
+                  zIndex={MAP_Z.plannerBadge}
                   onPress={handlePress}
                 >
                   <PlannerTransferBadges routes={transferRoutes} />
@@ -1038,7 +1137,7 @@ export function MapAdapter({
                 centerOffset={STATION_NAME_CENTER_OFFSET}
                 coordinate={coordinate}
                 tracksViewChanges={false}
-                zIndex={70}
+                zIndex={MAP_Z.plannerName}
                 onPress={handlePress}
               >
                 <StationNameLabel
@@ -1050,6 +1149,46 @@ export function MapAdapter({
             </Fragment>
           );
         })}
+
+        {/* Anchored to the train rather than pinned to a corner of the screen,
+            so MapKit keeps it glued to the coordinate while the map pans. This
+            is the same plain-annotation approach the station name labels use —
+            what makes it safe is that no MapKit Callout is involved. */}
+        {selectedVehicle ? (
+          <Marker
+            key={`vehicle-detail:${selectedVehicle.vehicle.id}`}
+            anchor={VEHICLE_DETAIL_ANCHOR}
+            centerOffset={VEHICLE_DETAIL_CENTER_OFFSET}
+            coordinate={selectedVehicle.coordinate}
+            zIndex={MAP_Z.vehicleDetail}
+            onPress={() => setSelectedVehicleId(null)}
+          >
+            <View style={styles.vehicleCard}>
+              <View style={styles.vehicleCardHeader}>
+                <View
+                  style={[
+                    styles.vehicleCardBadge,
+                    { backgroundColor: lineBrand.backgroundColor },
+                  ]}
+                >
+                  <Text
+                    style={[styles.vehicleCardBadgeText, { color: lineBrand.textColor }]}
+                  >
+                    {lineBrand.label}
+                  </Text>
+                </View>
+                {selectedVehicle.destinationName ? (
+                  <Text numberOfLines={1} style={styles.vehicleCardDestination}>
+                    {selectedVehicle.destinationName}
+                  </Text>
+                ) : null}
+              </View>
+              <Text numberOfLines={1} style={styles.vehicleCardMeta}>
+                {selectedVehicleMeta}
+              </Text>
+            </View>
+          </Marker>
+        ) : null}
 
       </MapView>
 
@@ -1184,7 +1323,8 @@ function VehicleMarker({
   color,
   iconColor,
   updatedAt,
-  children,
+  selected,
+  onPress,
 }: {
   accessibilityLabel: string;
   coordinate: LatLng;
@@ -1192,100 +1332,37 @@ function VehicleMarker({
   color: string;
   iconColor: string;
   updatedAt: number;
-  children?: React.ReactNode;
+  selected: boolean;
+  onPress: () => void;
 }) {
   const styles = useThemedStyles(createStyles);
-  const markerRef = useRef<MapMarker | null>(null);
   const firstRing = useRef(new RNAnimated.Value(0)).current;
   const secondRing = useRef(new RNAnimated.Value(0)).current;
-  const lastUpdatedAtRef = useRef<number | null>(null);
-  const targetCoordinateRef = useRef(coordinate);
-  // MapKit dismisses the callout whenever the marker re-renders, so while it
-  // is open every state change is suppressed (refs only — a setState here
-  // would itself close it) and deferred work is flushed on deselect.
-  const isSelectedRef = useRef(false);
-  const pendingCoordinateRef = useRef<LatLng | null>(null);
-  const [isPulsing, setIsPulsing] = useState(true);
-  const [renderedCoordinate, setRenderedCoordinate] = useState(coordinate);
 
-  // Positions are polled, so the marker glides to each new coordinate instead
-  // of teleporting. The native command moves the annotation without
-  // re-rasterising it, which is why the coordinate prop only catches up once
-  // the move is over — updating it earlier would snap the marker to the end.
+  // Two staggered sonar rings fire whenever the feed reports movement, which is
+  // what `updatedAt` tracks. They run on the native driver and never touch the
+  // annotation's coordinate, so an open callout survives them: MapKit only
+  // dismisses a callout when the annotation it is attached to moves.
   useEffect(() => {
-    const target = targetCoordinateRef.current;
-    if (
-      target.latitude === coordinate.latitude &&
-      target.longitude === coordinate.longitude
-    ) {
-      return;
-    }
-
-    targetCoordinateRef.current = coordinate;
-    markerRef.current?.animateMarkerToCoordinate(coordinate, VEHICLE_MOVE_ANIMATION_MS);
-    const timer = setTimeout(() => {
-      if (isSelectedRef.current) {
-        pendingCoordinateRef.current = coordinate;
-      } else {
-        setRenderedCoordinate(coordinate);
-      }
-    }, VEHICLE_MOVE_ANIMATION_MS);
-
-    return () => clearTimeout(timer);
-  }, [coordinate]);
-
-  // Two staggered sonar rings fire on every refresh — the live heartbeat.
-  // Tracking view changes re-rasterises the marker each frame, so it stays
-  // enabled only while the rings run; that window also captures heading
-  // changes, which land together with refreshed data. The first run covers
-  // the initial render.
-  useEffect(() => {
-    if (lastUpdatedAtRef.current === updatedAt) {
-      return;
-    }
-
-    lastUpdatedAtRef.current = updatedAt;
-    if (isSelectedRef.current) {
-      return;
-    }
-
     firstRing.setValue(0);
     secondRing.setValue(0);
-    setIsPulsing(true);
     const animation = RNAnimated.stagger(VEHICLE_PULSE_STAGGER_MS, [
       RNAnimated.timing(firstRing, {
         toValue: 1,
         duration: VEHICLE_PULSE_RING_MS,
-        useNativeDriver: false,
+        useNativeDriver: true,
       }),
       RNAnimated.timing(secondRing, {
         toValue: 1,
         duration: VEHICLE_PULSE_RING_MS,
-        useNativeDriver: false,
+        useNativeDriver: true,
       }),
     ]);
 
-    animation.start(({ finished }) => {
-      if (finished && !isSelectedRef.current) {
-        setIsPulsing(false);
-      }
-    });
+    animation.start();
 
     return () => animation.stop();
   }, [firstRing, secondRing, updatedAt]);
-
-  const handleSelect = useCallback(() => {
-    isSelectedRef.current = true;
-  }, []);
-
-  const handleDeselect = useCallback(() => {
-    isSelectedRef.current = false;
-    setIsPulsing(false);
-    if (pendingCoordinateRef.current) {
-      setRenderedCoordinate({ ...pendingCoordinateRef.current });
-      pendingCoordinateRef.current = null;
-    }
-  }, []);
 
   const ringStyle = (ring: RNAnimated.Value) => [
     styles.vehiclePulseRing,
@@ -1308,18 +1385,29 @@ function VehicleMarker({
 
   return (
     <Marker
-      ref={markerRef}
       accessibilityLabel={accessibilityLabel}
       anchor={STATION_MARKER_ANCHOR}
-      coordinate={renderedCoordinate}
-      tracksViewChanges={isPulsing}
-      zIndex={12}
-      onSelect={handleSelect}
-      onDeselect={handleDeselect}
+      coordinate={coordinate}
+      zIndex={MAP_Z.vehicle}
+      onPress={onPress}
     >
       <View style={styles.vehicleMarkerBox}>
         <RNAnimated.View pointerEvents="none" style={ringStyle(firstRing)} />
         <RNAnimated.View pointerEvents="none" style={ringStyle(secondRing)} />
+        {/* The detail card sits at the bottom of the screen, so the halo is what
+            ties it to this particular train rather than proximity. */}
+        {selected ? (
+          <View
+            pointerEvents="none"
+            style={[
+              styles.vehicleSelectedHalo,
+              {
+                backgroundColor: withAlpha(color, 0.22),
+                borderColor: withAlpha(color, 0.75),
+              },
+            ]}
+          />
+        ) : null}
         {bearingDegrees !== null ? (
           <View
             pointerEvents="none"
@@ -1335,7 +1423,6 @@ function VehicleMarker({
           <MaterialIcons name="tram" size={15} color={iconColor} />
         </View>
       </View>
-      {children}
     </Marker>
   );
 }
@@ -1436,7 +1523,7 @@ function StationNameMarker({
       }
       coordinate={coordinate}
       tracksViewChanges={emphasized && lineCount === null}
-      zIndex={emphasized ? 40 : 35}
+      zIndex={emphasized ? MAP_Z.stationNameSelected : MAP_Z.stationName}
       onPress={onPress}
     >
       <StationNameLabel
@@ -1648,10 +1735,25 @@ const createStyles = (palette: Palette) => StyleSheet.create({
     borderRightColor: 'transparent',
     borderBottomColor: '#FFFFFF',
   },
+  // Centred in the 60 pt marker box, behind the tile.
+  vehicleSelectedHalo: {
+    position: 'absolute',
+    top: 10.5,
+    left: 10.5,
+    width: 39,
+    height: 39,
+    borderRadius: 15,
+    borderWidth: 1.5,
+  },
+  // A rounded tile, deliberately not a circle: every station annotation on the
+  // map is a white-ringed disc, and a disc-shaped vehicle at a station read as
+  // a second station rather than as a train. The radius stays close to circular
+  // so the orbiting heading tip keeps an even gap at every angle — a squarer
+  // corner reaches further from the centre than the middle of an edge does.
   vehicleMarker: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
+    width: 27,
+    height: 27,
+    borderRadius: 11,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 2.5,
@@ -1662,23 +1764,50 @@ const createStyles = (palette: Palette) => StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     elevation: 4,
   },
-  vehicleCallout: {
-    width: 220,
+  // Lives inside a Marker, so it sizes to its content and needs no positioning
+  // of its own. The cap keeps a long destination from spanning the viewport.
+  vehicleCard: {
+    // Fits "Barcelona - Plaça Catalunya", the longest destination on the network.
+    maxWidth: 248,
     gap: 3,
-    borderRadius: 12,
-    padding: 12,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
     backgroundColor: palette.surfaceElevated,
     borderWidth: 1,
     borderColor: palette.border,
+    shadowColor: palette.shadow,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 14,
+    elevation: 8,
   },
-  vehicleCalloutTitle: {
+  vehicleCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  vehicleCardBadge: {
+    minWidth: 26,
+    height: 19,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 5,
+  },
+  vehicleCardBadgeText: {
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  vehicleCardDestination: {
+    flexShrink: 1,
     color: palette.text,
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '800',
   },
-  vehicleCalloutText: {
+  vehicleCardMeta: {
     color: palette.textMuted,
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '600',
   },
   nearbyLabel: {

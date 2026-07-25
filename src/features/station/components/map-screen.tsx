@@ -126,7 +126,7 @@ export function MapScreen({
 
   const stationsQuery = useLineStationsQuery(mode, lineCode);
   const segmentsQuery = useLineSegmentsQuery(mode, lineCode);
-  const vehiclesQuery = useLineVehiclesQuery(mode, lineCode);
+  const { vehicles, positionsUpdatedAt } = useLineVehiclesQuery(mode, lineCode);
   const stations = useMemo(() => stationsQuery.data ?? [], [stationsQuery.data]);
 
   const [busFamily, setBusFamily] = useState<BusLineFamily | null>(null);
@@ -336,8 +336,8 @@ export function MapScreen({
         mode={mode}
         stations={stations}
         segments={segmentsQuery.data ?? []}
-        transitVehicles={vehiclesQuery.data ?? []}
-        transitVehiclesUpdatedAt={vehiclesQuery.dataUpdatedAt}
+        transitVehicles={vehicles}
+        transitVehiclesUpdatedAt={positionsUpdatedAt}
         selectedStationCode={stationCode}
         stationFocusRequestId={stationFocusRequestId}
         stationInterchanges={stationInterchanges}

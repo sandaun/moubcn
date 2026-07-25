@@ -32,6 +32,12 @@ export const env = {
 export const runtimeConfig = {
   realtimeCacheTtlMs: 8_000,
   realtimeStaleMaxMs: 30_000,
+  // Geotren positions are republished every ~2 min, so a short TTL would only
+  // proxy identical payloads. The stale window has to outlast one client poll
+  // interval, otherwise a single upstream failure leaves the map with no
+  // vehicles at all until the next successful fetch.
+  vehiclesCacheTtlMs: 25_000,
+  vehiclesStaleMaxMs: 2 * 60_000,
   serviceAlertsCacheTtlMs: 5 * 60_000,
   serviceAlertsStaleMaxMs: 60 * 60_000,
   upstreamTimeoutMs: 10_000,

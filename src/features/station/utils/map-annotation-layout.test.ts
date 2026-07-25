@@ -100,4 +100,54 @@ describe('getVisibleStationAnnotationCodes', () => {
 
     assert.deepEqual(Array.from(visibleCodes), ['first', 'second']);
   });
+
+  it('suppresses an annotation covered by a vehicle', () => {
+    const visibleCodes = getVisibleStationAnnotationCodes(
+      [makeCandidate('covered', 2), makeCandidate('clear', 2.025)],
+      viewport,
+      [{ lat: 41, lon: 2 }],
+    );
+
+    assert.deepEqual(Array.from(visibleCodes), ['clear']);
+  });
+
+  it('keeps the selected annotation even when a vehicle covers it', () => {
+    const visibleCodes = getVisibleStationAnnotationCodes(
+      [makeCandidate('selected', 2, { selected: true })],
+      viewport,
+      [{ lat: 41, lon: 2 }],
+    );
+
+    assert.deepEqual(Array.from(visibleCodes), ['selected']);
+  });
+
+  it('lets an annotation keep its label when the vehicle is far enough away', () => {
+    const visibleCodes = getVisibleStationAnnotationCodes(
+      [makeCandidate('station', 2)],
+      viewport,
+      [{ lat: 41, lon: 2.02 }],
+    );
+
+    assert.deepEqual(Array.from(visibleCodes), ['station']);
+  });
+
+  it('ignores vehicles without a usable position', () => {
+    const visibleCodes = getVisibleStationAnnotationCodes(
+      [makeCandidate('station', 2)],
+      viewport,
+      [{ lat: Number.NaN, lon: 2 }],
+    );
+
+    assert.deepEqual(Array.from(visibleCodes), ['station']);
+  });
+
+  it('does not let a vehicle suppress every annotation on the line', () => {
+    const visibleCodes = getVisibleStationAnnotationCodes(
+      [makeCandidate('covered', 2), makeCandidate('next', 2.012)],
+      viewport,
+      [{ lat: 41, lon: 2 }],
+    );
+
+    assert.deepEqual(Array.from(visibleCodes), ['next']);
+  });
 });
