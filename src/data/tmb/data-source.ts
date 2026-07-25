@@ -8,15 +8,6 @@ import {
   fetchServiceAlerts as fetchServiceAlertsFromApi,
   fetchStationArrivals as fetchStationArrivalsFromApi,
 } from '@/src/data/tmb/client';
-import {
-  fetchLineSegmentsFromMock,
-  fetchLineStationsFromMock,
-  fetchLinesFromMock,
-  fetchNearbyStopsFromMock,
-  fetchPlannedRoutesFromMock,
-  fetchServiceAlertsFromMock,
-  fetchStationArrivalsFromMock,
-} from '@/src/data/tmb/mock-client';
 import type { ServiceAlert } from '@/src/domain/alerts/models';
 import type { Line, Station, TransportMode } from '@/src/domain/catalog/models';
 import type { LatLng, Segment } from '@/src/domain/geo/models';
@@ -55,15 +46,28 @@ const apiDataSource: TmbDataSource = {
   fetchNearbyStops: fetchNearbyStopsFromApi,
 };
 
-const mockDataSource: TmbDataSource = {
-  fetchLines: fetchLinesFromMock,
-  fetchLineStations: fetchLineStationsFromMock,
-  fetchLineSegments: fetchLineSegmentsFromMock,
-  fetchStationArrivals: fetchStationArrivalsFromMock,
-  fetchPlannedRoutes: fetchPlannedRoutesFromMock,
-  fetchServiceAlerts: fetchServiceAlertsFromMock,
-  fetchNearbyStops: fetchNearbyStopsFromMock,
-};
+// The fixtures are development tooling, so the require stays inside the
+// `__DEV__` branch: Metro folds that branch away before it collects
+// dependencies, keeping `mock-client` out of release bundles entirely. A
+// top-level import would ship every fixture to users regardless of this flag.
+function loadMockDataSource(): TmbDataSource | null {
+  if (typeof __DEV__ !== 'undefined' && __DEV__) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- a static import would defeat the purpose of this branch
+    const mock = require('@/src/data/tmb/mock-client') as typeof import('@/src/data/tmb/mock-client');
+
+    return {
+      fetchLines: mock.fetchLinesFromMock,
+      fetchLineStations: mock.fetchLineStationsFromMock,
+      fetchLineSegments: mock.fetchLineSegmentsFromMock,
+      fetchStationArrivals: mock.fetchStationArrivalsFromMock,
+      fetchPlannedRoutes: mock.fetchPlannedRoutesFromMock,
+      fetchServiceAlerts: mock.fetchServiceAlertsFromMock,
+      fetchNearbyStops: mock.fetchNearbyStopsFromMock,
+    };
+  }
+
+  return null;
+}
 
 export const DATA_SOURCE_MODE = APP_CONFIG.useMock ? 'mock' : 'api';
 
@@ -71,8 +75,22 @@ if (typeof __DEV__ !== 'undefined' && __DEV__) {
   console.log(`[TMB] Data source mode: ${DATA_SOURCE_MODE}`);
 }
 
+let mockDataSource: TmbDataSource | null | undefined;
+
 export function getTmbDataSource(): TmbDataSource {
-  return DATA_SOURCE_MODE === 'mock' ? mockDataSource : apiDataSource;
+  if (DATA_SOURCE_MODE !== 'mock') {
+    return apiDataSource;
+  }
+
+  mockDataSource ??= loadMockDataSource();
+
+  if (!mockDataSource) {
+    throw new Error(
+      'EXPO_PUBLIC_USE_MOCK=true is only supported in development builds',
+    );
+  }
+
+  return mockDataSource;
 }
 
 export async function fetchLines(mode: TransportMode) {
