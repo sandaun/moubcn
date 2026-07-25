@@ -186,27 +186,29 @@ const VEHICLE_PULSE_STAGGER_MS = 500;
 // produced it, rather than as a tap on empty map meaning "dismiss".
 const VEHICLE_PRESS_ECHO_MS = 350;
 
-// Every annotation layer in painting order, lowest first. MapKit re-applies
-// zPosition from this value on each layout pass, so a layer that is meant to
-// stay above another only does so as long as the whole scale is defined in one
-// place — the vehicle marker silently sank below the station labels once it was
-// given a literal out of order.
+// AIRMapMarker feeds zIndex straight into MKAnnotationView.zPriority, which
+// runs 0…1000 with DefaultUnselected at 500. Below that default MapKit stays
+// free to order annotations its own way — by latitude — which is why the
+// vehicle marker kept drawing under station labels only *sometimes*. Keeping
+// the whole scale above 500 leaves relative order as the only thing MapKit has
+// to honour. Defined in one place so a stray literal cannot reorder the map.
+const MAP_Z_BASE = 600;
 const MAP_Z = {
-  routeBehindPlanner: 1,
-  route: 5,
-  nearbyStop: 8,
-  nearbyStopLabel: 9,
-  station: 10,
-  stationSelected: 20,
-  stationBadge: 30,
-  stationName: 35,
-  stationNameSelected: 40,
-  plannerRoute: 45,
-  vehicle: 55,
-  plannerStation: 60,
-  plannerBadge: 65,
-  plannerName: 70,
-  plannerEndpoint: 75,
+  routeBehindPlanner: MAP_Z_BASE + 1,
+  route: MAP_Z_BASE + 5,
+  nearbyStop: MAP_Z_BASE + 8,
+  nearbyStopLabel: MAP_Z_BASE + 9,
+  station: MAP_Z_BASE + 10,
+  stationSelected: MAP_Z_BASE + 20,
+  stationBadge: MAP_Z_BASE + 30,
+  stationName: MAP_Z_BASE + 35,
+  stationNameSelected: MAP_Z_BASE + 40,
+  plannerRoute: MAP_Z_BASE + 45,
+  vehicle: MAP_Z_BASE + 55,
+  plannerStation: MAP_Z_BASE + 60,
+  plannerBadge: MAP_Z_BASE + 65,
+  plannerName: MAP_Z_BASE + 70,
+  plannerEndpoint: MAP_Z_BASE + 75,
 } as const;
 
 export function MapAdapter({
@@ -535,6 +537,11 @@ export function MapAdapter({
 
         return {
           vehicle,
+          // The feed reports the destination as a catalog station code, which is
+          // not something to put in front of a user.
+          destinationName: vehicle.destination
+            ? stationByCode.get(vehicle.destination)?.name ?? vehicle.destination
+            : undefined,
           coordinate: {
             latitude: placement.point.lat,
             longitude: placement.point.lon,
@@ -554,6 +561,37 @@ export function MapAdapter({
       setSelectedVehicleId(null);
     }
   }, [selectedVehicle, selectedVehicleId]);
+
+  // Deliberately not memoised: the age has to be recomputed on every render so
+  // it stays honest between polls. Nothing here is expensive.
+  const selectedVehicleMeta = (() => {
+    if (!selectedVehicle) {
+      return '';
+    }
+
+    const { isOnTime, occupancyPercent } = selectedVehicle.vehicle;
+    const parts: string[] = [];
+
+    if (isOnTime !== undefined) {
+      parts.push(t(isOnTime ? 'vehicle_on_time' : 'vehicle_delayed'));
+    }
+    if (occupancyPercent !== undefined) {
+      parts.push(t('vehicle_occupancy', { percent: Math.round(occupancyPercent) }));
+    }
+    if (transitVehiclesUpdatedAt > 0) {
+      const ageSeconds = Math.max(
+        0,
+        Math.round((Date.now() - transitVehiclesUpdatedAt) / 1_000),
+      );
+      parts.push(
+        ageSeconds < 60
+          ? t('vehicle_age_seconds', { seconds: ageSeconds })
+          : t('vehicle_age_minutes', { minutes: Math.round(ageSeconds / 60) }),
+      );
+    }
+
+    return parts.join(' · ');
+  })();
 
   const vehicleObstacles = useMemo<MapAnnotationObstacle[]>(
     () =>
@@ -814,9 +852,11 @@ export function MapAdapter({
     [onMapPress],
   );
 
+  // Pressing the same train again closes the card, which together with a press
+  // on empty map is why it needs no close button of its own.
   const handleVehiclePress = useCallback((vehicleId: string) => {
     lastVehiclePressAtRef.current = Date.now();
-    setSelectedVehicleId(vehicleId);
+    setSelectedVehicleId((current) => (current === vehicleId ? null : vehicleId));
   }, []);
 
   const routeLayerKey = routePolylines
@@ -1108,42 +1148,26 @@ export function MapAdapter({
 
       {selectedVehicle ? (
         <Animated.View style={[styles.vehicleCard, bottomControlsAnimatedStyle]}>
-          <View style={styles.vehicleCardBody}>
-            <Text style={styles.vehicleCalloutTitle}>
-              {selectedVehicle.vehicle.lineCode}
-              {selectedVehicle.vehicle.destination
-                ? ` → ${selectedVehicle.vehicle.destination}`
-                : ''}
-            </Text>
-            {selectedVehicle.vehicle.isOnTime !== undefined ? (
-              <Text style={styles.vehicleCalloutText}>
-                {t(selectedVehicle.vehicle.isOnTime ? 'vehicle_on_time' : 'vehicle_delayed')}
+          <View style={styles.vehicleCardHeader}>
+            <View
+              style={[
+                styles.vehicleCardBadge,
+                { backgroundColor: lineBrand.backgroundColor },
+              ]}
+            >
+              <Text style={[styles.vehicleCardBadgeText, { color: lineBrand.textColor }]}>
+                {lineBrand.label}
               </Text>
-            ) : null}
-            {selectedVehicle.vehicle.occupancyPercent !== undefined ? (
-              <Text style={styles.vehicleCalloutText}>
-                {t('vehicle_occupancy', {
-                  percent: Math.round(selectedVehicle.vehicle.occupancyPercent),
-                })}
-              </Text>
-            ) : null}
-            {selectedVehicle.vehicle.nextStops.length ? (
-              <Text style={styles.vehicleCalloutText} numberOfLines={2}>
-                {t('vehicle_next_stops', {
-                  stops: selectedVehicle.vehicle.nextStops.slice(0, 3).join(', '),
-                })}
+            </View>
+            {selectedVehicle.destinationName ? (
+              <Text numberOfLines={1} style={styles.vehicleCardDestination}>
+                {selectedVehicle.destinationName}
               </Text>
             ) : null}
           </View>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={t('vehicle_close')}
-            hitSlop={10}
-            style={styles.vehicleCardClose}
-            onPress={() => setSelectedVehicleId(null)}
-          >
-            <IconSymbol name="xmark" size={13} color={palette.textMuted} weight="semibold" />
-          </Pressable>
+          <Text numberOfLines={1} style={styles.vehicleCardMeta}>
+            {selectedVehicleMeta}
+          </Text>
         </Animated.View>
       ) : null}
 
@@ -1674,10 +1698,13 @@ const createStyles = (palette: Palette) => StyleSheet.create({
     borderRightColor: 'transparent',
     borderBottomColor: '#FFFFFF',
   },
+  // A rounded tile, deliberately not a circle: every station annotation on the
+  // map is a white-ringed disc, and a disc-shaped vehicle at a station read as
+  // a second station rather than as a train.
   vehicleMarker: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
+    width: 27,
+    height: 27,
+    borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 2.5,
@@ -1688,18 +1715,17 @@ const createStyles = (palette: Palette) => StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     elevation: 4,
   },
-  // Sits above the action column so the close button stays reachable while the
-  // sheet is collapsed.
+  // Hugs its content instead of stretching, and clears the action column on the
+  // right. Rides the same animated inset as the other bottom overlays.
   vehicleCard: {
     position: 'absolute',
     left: 16,
-    right: 80,
     bottom: 88,
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 8,
-    borderRadius: 12,
-    padding: 12,
+    maxWidth: '70%',
+    gap: 3,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
     backgroundColor: palette.surfaceElevated,
     borderWidth: 1,
     borderColor: palette.border,
@@ -1710,26 +1736,32 @@ const createStyles = (palette: Palette) => StyleSheet.create({
     elevation: 8,
     zIndex: 16,
   },
-  vehicleCardBody: {
-    flex: 1,
-    gap: 3,
+  vehicleCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
   },
-  vehicleCardClose: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
+  vehicleCardBadge: {
+    minWidth: 26,
+    height: 19,
+    borderRadius: 6,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: palette.surfaceStrong,
+    paddingHorizontal: 5,
   },
-  vehicleCalloutTitle: {
+  vehicleCardBadgeText: {
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  vehicleCardDestination: {
+    flexShrink: 1,
     color: palette.text,
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '800',
   },
-  vehicleCalloutText: {
+  vehicleCardMeta: {
     color: palette.textMuted,
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '600',
   },
   nearbyLabel: {
