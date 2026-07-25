@@ -174,6 +174,10 @@ const UNSELECTED_STATION_NAME_CENTER_OFFSET = { x: 0, y: 22 };
 const STATION_NAME_CENTER_OFFSET = { x: 0, y: 26 };
 const SELECTED_STATION_NAME_CENTER_OFFSET = { x: 0, y: 30 };
 const SELECTED_MULTILINE_STATION_NAME_CENTER_OFFSET = { x: 0, y: 38 };
+// Places the detail above the vehicle tile: iOS positions custom annotations by
+// centerOffset alone, so this clears half the 27 pt tile plus half the card.
+const VEHICLE_DETAIL_ANCHOR = { x: 0.5, y: 1 };
+const VEHICLE_DETAIL_CENTER_OFFSET = { x: 0, y: -48 };
 const STATION_MARKER_IMAGE = require('@/assets/map/station-marker.png') as ImageRequireSource;
 // Beyond this the reported position is not plausibly the drawn route, so the
 // raw coordinate is kept instead of snapping onto an unrelated stretch.
@@ -205,6 +209,7 @@ const MAP_Z = {
   stationNameSelected: MAP_Z_BASE + 40,
   plannerRoute: MAP_Z_BASE + 45,
   vehicle: MAP_Z_BASE + 55,
+  vehicleDetail: MAP_Z_BASE + 58,
   plannerStation: MAP_Z_BASE + 60,
   plannerBadge: MAP_Z_BASE + 65,
   plannerName: MAP_Z_BASE + 70,
@@ -1145,32 +1150,47 @@ export function MapAdapter({
           );
         })}
 
-      </MapView>
-
-      {selectedVehicle ? (
-        <Animated.View style={[styles.vehicleCard, bottomControlsAnimatedStyle]}>
-          <View style={styles.vehicleCardHeader}>
-            <View
-              style={[
-                styles.vehicleCardBadge,
-                { backgroundColor: lineBrand.backgroundColor },
-              ]}
-            >
-              <Text style={[styles.vehicleCardBadgeText, { color: lineBrand.textColor }]}>
-                {lineBrand.label}
+        {/* Anchored to the train rather than pinned to a corner of the screen,
+            so MapKit keeps it glued to the coordinate while the map pans. This
+            is the same plain-annotation approach the station name labels use —
+            what makes it safe is that no MapKit Callout is involved. */}
+        {selectedVehicle ? (
+          <Marker
+            key={`vehicle-detail:${selectedVehicle.vehicle.id}`}
+            anchor={VEHICLE_DETAIL_ANCHOR}
+            centerOffset={VEHICLE_DETAIL_CENTER_OFFSET}
+            coordinate={selectedVehicle.coordinate}
+            zIndex={MAP_Z.vehicleDetail}
+            onPress={() => setSelectedVehicleId(null)}
+          >
+            <View style={styles.vehicleCard}>
+              <View style={styles.vehicleCardHeader}>
+                <View
+                  style={[
+                    styles.vehicleCardBadge,
+                    { backgroundColor: lineBrand.backgroundColor },
+                  ]}
+                >
+                  <Text
+                    style={[styles.vehicleCardBadgeText, { color: lineBrand.textColor }]}
+                  >
+                    {lineBrand.label}
+                  </Text>
+                </View>
+                {selectedVehicle.destinationName ? (
+                  <Text numberOfLines={1} style={styles.vehicleCardDestination}>
+                    {selectedVehicle.destinationName}
+                  </Text>
+                ) : null}
+              </View>
+              <Text numberOfLines={1} style={styles.vehicleCardMeta}>
+                {selectedVehicleMeta}
               </Text>
             </View>
-            {selectedVehicle.destinationName ? (
-              <Text numberOfLines={1} style={styles.vehicleCardDestination}>
-                {selectedVehicle.destinationName}
-              </Text>
-            ) : null}
-          </View>
-          <Text numberOfLines={1} style={styles.vehicleCardMeta}>
-            {selectedVehicleMeta}
-          </Text>
-        </Animated.View>
-      ) : null}
+          </Marker>
+        ) : null}
+
+      </MapView>
 
       <Animated.View
         pointerEvents="box-none"
@@ -1744,13 +1764,11 @@ const createStyles = (palette: Palette) => StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     elevation: 4,
   },
-  // Hugs its content instead of stretching, and clears the action column on the
-  // right. Rides the same animated inset as the other bottom overlays.
+  // Lives inside a Marker, so it sizes to its content and needs no positioning
+  // of its own. The cap keeps a long destination from spanning the viewport.
   vehicleCard: {
-    position: 'absolute',
-    left: 16,
-    bottom: 88,
-    maxWidth: '70%',
+    // Fits "Barcelona - Plaça Catalunya", the longest destination on the network.
+    maxWidth: 248,
     gap: 3,
     borderRadius: 14,
     paddingHorizontal: 12,
@@ -1763,7 +1781,6 @@ const createStyles = (palette: Palette) => StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 14,
     elevation: 8,
-    zIndex: 16,
   },
   vehicleCardHeader: {
     flexDirection: 'row',
