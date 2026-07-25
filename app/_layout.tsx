@@ -19,7 +19,6 @@ function RootNavigator() {
   return (
     <Stack>
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-      <Stack.Screen name="station/[lineCode]/[stationCode]" options={{ headerShown: false }} />
       <Stack.Screen
         name="lines/[mode]/[lineCode]"
         options={{ headerShown: false, animation: 'slide_from_right' }}
