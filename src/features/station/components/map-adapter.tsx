@@ -182,6 +182,9 @@ const VEHICLE_SNAP_MAX_DISTANCE_METERS = 150;
 // marker into a permanent animation.
 const VEHICLE_PULSE_RING_MS = 1_600;
 const VEHICLE_PULSE_STAGGER_MS = 500;
+// How long a map press is still treated as the echo of the vehicle press that
+// produced it, rather than as a tap on empty map meaning "dismiss".
+const VEHICLE_PRESS_ECHO_MS = 350;
 
 // Every annotation layer in painting order, lowest first. MapKit re-applies
 // zPosition from this value on each layout pass, so a layer that is meant to
@@ -284,6 +287,12 @@ export function MapAdapter({
   // resizes itself from its largest subview — which tore the marker's own
   // content apart and dismissed the bubble on the spot.
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
+  // A marker tap does not consume the touch (AIRMapMarker sets
+  // cancelsTouchesInView = NO so the map keeps receiving selection events), so
+  // pressing a vehicle also fires the map's own press. Both orderings are safe:
+  // if the marker lands first the map press is ignored as an echo, and if the
+  // map lands first it clears nothing the marker has not yet set.
+  const lastVehiclePressAtRef = useRef(0);
   const selectedStation = stations.find(
     (station) => station.code === selectedStationCode,
   );
@@ -797,11 +806,18 @@ export function MapAdapter({
   const handleMapPress = useCallback(
     (event: MapPressEvent) => {
       const coordinate = event.nativeEvent.coordinate;
-      setSelectedVehicleId(null);
+      if (Date.now() - lastVehiclePressAtRef.current > VEHICLE_PRESS_ECHO_MS) {
+        setSelectedVehicleId(null);
+      }
       onMapPress?.({ lat: coordinate.latitude, lon: coordinate.longitude });
     },
     [onMapPress],
   );
+
+  const handleVehiclePress = useCallback((vehicleId: string) => {
+    lastVehiclePressAtRef.current = Date.now();
+    setSelectedVehicleId(vehicleId);
+  }, []);
 
   const routeLayerKey = routePolylines
     .map((polyline) => `${polyline.id}:${polyline.coordinates.length}`)
@@ -974,7 +990,7 @@ export function MapAdapter({
             color={lineBrand.backgroundColor}
             iconColor={lineBrand.textColor}
             updatedAt={transitVehiclesUpdatedAt}
-            onPress={() => setSelectedVehicleId(vehicle.id)}
+            onPress={() => handleVehiclePress(vehicle.id)}
           />
         ))}
 
