@@ -31,6 +31,7 @@ const MAPPING = {
   'tram.fill': 'tram',
   'star.fill': 'star',
   'person.fill': 'person',
+  xmark: 'close',
 } as IconMapping;
 
 /**

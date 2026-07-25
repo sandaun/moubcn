@@ -1,6 +1,6 @@
 // The vehicle marker uses the MaterialIcons glyph font directly instead of
-// IconSymbol: SF Symbols render as a native view, which is unreliable when
-// react-native-maps rasterises a marker with tracksViewChanges disabled.
+// IconSymbol: SF Symbols render as a native view, which Android rasterises
+// unreliably inside a marker bitmap. A glyph is safe on both platforms.
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import * as Location from 'expo-location';
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -19,7 +19,6 @@ import Animated, {
   useAnimatedStyle,
 } from 'react-native-reanimated';
 import MapView, {
-  Callout,
   Marker,
   Polyline,
   type LatLng,
@@ -280,6 +279,11 @@ export function MapAdapter({
   const userLocationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [userCoordinate, setUserCoordinate] = useState<LatLng | null>(null);
   const [visibleRegion, setVisibleRegion] = useState<Region | null>(null);
+  // The vehicle detail is a plain overlay rather than a MapKit Callout. A
+  // Callout is presented *inside* the annotation view, and AIRMapMarker then
+  // resizes itself from its largest subview — which tore the marker's own
+  // content apart and dismissed the bubble on the spot.
+  const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
   const selectedStation = stations.find(
     (station) => station.code === selectedStationCode,
   );
@@ -530,6 +534,18 @@ export function MapAdapter({
         };
       });
   }, [explorationVisible, routePolylines, stations, transitVehicles]);
+  const selectedVehicle = placedVehicles.find(
+    ({ vehicle }) => vehicle.id === selectedVehicleId,
+  );
+
+  // Drop the detail when its train leaves the feed, changes line, or the
+  // planner takes over, so the card can never outlive the marker it describes.
+  useEffect(() => {
+    if (selectedVehicleId !== null && !selectedVehicle) {
+      setSelectedVehicleId(null);
+    }
+  }, [selectedVehicle, selectedVehicleId]);
+
   const vehicleObstacles = useMemo<MapAnnotationObstacle[]>(
     () =>
       placedVehicles.map(({ coordinate }) => ({
@@ -781,6 +797,7 @@ export function MapAdapter({
   const handleMapPress = useCallback(
     (event: MapPressEvent) => {
       const coordinate = event.nativeEvent.coordinate;
+      setSelectedVehicleId(null);
       onMapPress?.({ lat: coordinate.latitude, lon: coordinate.longitude });
     },
     [onMapPress],
@@ -957,30 +974,8 @@ export function MapAdapter({
             color={lineBrand.backgroundColor}
             iconColor={lineBrand.textColor}
             updatedAt={transitVehiclesUpdatedAt}
-          >
-            <Callout tooltip>
-              <View style={styles.vehicleCallout}>
-                <Text style={styles.vehicleCalloutTitle}>
-                  {vehicle.lineCode}{vehicle.destination ? ` → ${vehicle.destination}` : ''}
-                </Text>
-                {vehicle.isOnTime !== undefined ? (
-                  <Text style={styles.vehicleCalloutText}>
-                    {t(vehicle.isOnTime ? 'vehicle_on_time' : 'vehicle_delayed')}
-                  </Text>
-                ) : null}
-                {vehicle.occupancyPercent !== undefined ? (
-                  <Text style={styles.vehicleCalloutText}>
-                    {t('vehicle_occupancy', { percent: Math.round(vehicle.occupancyPercent) })}
-                  </Text>
-                ) : null}
-                {vehicle.nextStops.length ? (
-                  <Text style={styles.vehicleCalloutText} numberOfLines={2}>
-                    {t('vehicle_next_stops', { stops: vehicle.nextStops.slice(0, 3).join(', ') })}
-                  </Text>
-                ) : null}
-              </View>
-            </Callout>
-          </VehicleMarker>
+            onPress={() => setSelectedVehicleId(vehicle.id)}
+          />
         ))}
 
         {latitudeDelta <= 0.02
@@ -1094,6 +1089,47 @@ export function MapAdapter({
         })}
 
       </MapView>
+
+      {selectedVehicle ? (
+        <Animated.View style={[styles.vehicleCard, bottomControlsAnimatedStyle]}>
+          <View style={styles.vehicleCardBody}>
+            <Text style={styles.vehicleCalloutTitle}>
+              {selectedVehicle.vehicle.lineCode}
+              {selectedVehicle.vehicle.destination
+                ? ` → ${selectedVehicle.vehicle.destination}`
+                : ''}
+            </Text>
+            {selectedVehicle.vehicle.isOnTime !== undefined ? (
+              <Text style={styles.vehicleCalloutText}>
+                {t(selectedVehicle.vehicle.isOnTime ? 'vehicle_on_time' : 'vehicle_delayed')}
+              </Text>
+            ) : null}
+            {selectedVehicle.vehicle.occupancyPercent !== undefined ? (
+              <Text style={styles.vehicleCalloutText}>
+                {t('vehicle_occupancy', {
+                  percent: Math.round(selectedVehicle.vehicle.occupancyPercent),
+                })}
+              </Text>
+            ) : null}
+            {selectedVehicle.vehicle.nextStops.length ? (
+              <Text style={styles.vehicleCalloutText} numberOfLines={2}>
+                {t('vehicle_next_stops', {
+                  stops: selectedVehicle.vehicle.nextStops.slice(0, 3).join(', '),
+                })}
+              </Text>
+            ) : null}
+          </View>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t('vehicle_close')}
+            hitSlop={10}
+            style={styles.vehicleCardClose}
+            onPress={() => setSelectedVehicleId(null)}
+          >
+            <IconSymbol name="xmark" size={13} color={palette.textMuted} weight="semibold" />
+          </Pressable>
+        </Animated.View>
+      ) : null}
 
       <Animated.View
         pointerEvents="box-none"
@@ -1226,7 +1262,7 @@ function VehicleMarker({
   color,
   iconColor,
   updatedAt,
-  children,
+  onPress,
 }: {
   accessibilityLabel: string;
   coordinate: LatLng;
@@ -1234,7 +1270,7 @@ function VehicleMarker({
   color: string;
   iconColor: string;
   updatedAt: number;
-  children?: React.ReactNode;
+  onPress: () => void;
 }) {
   const styles = useThemedStyles(createStyles);
   const firstRing = useRef(new RNAnimated.Value(0)).current;
@@ -1290,6 +1326,7 @@ function VehicleMarker({
       anchor={STATION_MARKER_ANCHOR}
       coordinate={coordinate}
       zIndex={MAP_Z.vehicle}
+      onPress={onPress}
     >
       <View style={styles.vehicleMarkerBox}>
         <RNAnimated.View pointerEvents="none" style={ringStyle(firstRing)} />
@@ -1309,7 +1346,6 @@ function VehicleMarker({
           <MaterialIcons name="tram" size={15} color={iconColor} />
         </View>
       </View>
-      {children}
     </Marker>
   );
 }
@@ -1636,14 +1672,39 @@ const createStyles = (palette: Palette) => StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     elevation: 4,
   },
-  vehicleCallout: {
-    width: 220,
-    gap: 3,
+  // Sits above the action column so the close button stays reachable while the
+  // sheet is collapsed.
+  vehicleCard: {
+    position: 'absolute',
+    left: 16,
+    right: 80,
+    bottom: 88,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
     borderRadius: 12,
     padding: 12,
     backgroundColor: palette.surfaceElevated,
     borderWidth: 1,
     borderColor: palette.border,
+    shadowColor: palette.shadow,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 14,
+    elevation: 8,
+    zIndex: 16,
+  },
+  vehicleCardBody: {
+    flex: 1,
+    gap: 3,
+  },
+  vehicleCardClose: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: palette.surfaceStrong,
   },
   vehicleCalloutTitle: {
     color: palette.text,
