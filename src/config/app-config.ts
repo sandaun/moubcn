@@ -81,8 +81,10 @@ export const APP_CONFIG = {
   ...environmentConfig,
   catalogTtlMs: 7 * 24 * 60 * 60 * 1000,
   arrivalsPollIntervalMs: 30_000,
-  // Vehicle positions move continuously, so they are polled faster than
-  // arrivals. The API caches them for 8 s, which bounds the upstream load.
-  vehiclesPollIntervalMs: 10_000,
+  // The FGC producer stamps a new Geotren snapshot once a minute, but the open
+  // data portal republishes it roughly every two minutes and serves it 1.5-4
+  // min old, so anything faster than this only burns requests on identical
+  // payloads. Measured against the GTFS-RT header timestamps of the same feed.
+  vehiclesPollIntervalMs: 30_000,
   serviceAlertsPollIntervalMs: 5 * 60_000,
 } as const;
