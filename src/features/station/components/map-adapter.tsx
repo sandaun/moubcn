@@ -96,6 +96,7 @@ interface MapAdapterProps {
   segments: Segment[];
   transitVehicles?: TransitVehicle[];
   transitVehiclesUpdatedAt?: number;
+  routeGeometryPending?: boolean;
   selectedStationCode: string;
   stationFocusRequestId?: number;
   stationInterchanges?: StationInterchange[];
@@ -224,6 +225,7 @@ export function MapAdapter({
   segments,
   transitVehicles = [],
   transitVehiclesUpdatedAt = 0,
+  routeGeometryPending = false,
   selectedStationCode,
   stationFocusRequestId = 0,
   stationInterchanges = [],
@@ -511,7 +513,12 @@ export function MapAdapter({
   // its route and stations while the planner owns the map. They also feed the
   // annotation layout below, which is why they are placed this early.
   const placedVehicles = useMemo(() => {
-    if (!explorationVisible) {
+    // Every vehicle is snapped onto the drawn route, and until the segments
+    // arrive that route is the straight-line fallback through the stations.
+    // Rendering then means placing each train on a stand-in track and moving it
+    // the moment the real geometry lands — MapKit animates an annotation whose
+    // coordinate changes, which is the slow drift across the map on load.
+    if (!explorationVisible || routeGeometryPending) {
       return [];
     }
 
@@ -554,7 +561,13 @@ export function MapAdapter({
           bearingDegrees: placement.bearingDegrees,
         };
       });
-  }, [explorationVisible, routePolylines, stations, transitVehicles]);
+  }, [
+    explorationVisible,
+    routeGeometryPending,
+    routePolylines,
+    stations,
+    transitVehicles,
+  ]);
   const selectedVehicle = placedVehicles.find(
     ({ vehicle }) => vehicle.id === selectedVehicleId,
   );
