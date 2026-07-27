@@ -96,6 +96,7 @@ interface MapAdapterProps {
   segments: Segment[];
   transitVehicles?: TransitVehicle[];
   transitVehiclesUpdatedAt?: number;
+  routeGeometryPending?: boolean;
   selectedStationCode: string;
   stationFocusRequestId?: number;
   stationInterchanges?: StationInterchange[];
@@ -224,6 +225,7 @@ export function MapAdapter({
   segments,
   transitVehicles = [],
   transitVehiclesUpdatedAt = 0,
+  routeGeometryPending = false,
   selectedStationCode,
   stationFocusRequestId = 0,
   stationInterchanges = [],
@@ -511,7 +513,12 @@ export function MapAdapter({
   // its route and stations while the planner owns the map. They also feed the
   // annotation layout below, which is why they are placed this early.
   const placedVehicles = useMemo(() => {
-    if (!explorationVisible) {
+    // Every vehicle is snapped onto the drawn route, and until the segments
+    // arrive that route is the straight-line fallback through the stations.
+    // Rendering then means placing each train on a stand-in track and moving it
+    // the moment the real geometry lands — MapKit animates an annotation whose
+    // coordinate changes, which is the slow drift across the map on load.
+    if (!explorationVisible || routeGeometryPending) {
       return [];
     }
 
@@ -554,7 +561,13 @@ export function MapAdapter({
           bearingDegrees: placement.bearingDegrees,
         };
       });
-  }, [explorationVisible, routePolylines, stations, transitVehicles]);
+  }, [
+    explorationVisible,
+    routeGeometryPending,
+    routePolylines,
+    stations,
+    transitVehicles,
+  ]);
   const selectedVehicle = placedVehicles.find(
     ({ vehicle }) => vehicle.id === selectedVehicleId,
   );
@@ -1343,7 +1356,18 @@ function VehicleMarker({
   // what `updatedAt` tracks. They run on the native driver and never touch the
   // annotation's coordinate, so an open callout survives them: MapKit only
   // dismisses a callout when the annotation it is attached to moves.
+  //
+  // Not on mount, though: nothing moved, the marker merely appeared, and two
+  // rings expanding around a small tile for two seconds read as the train
+  // sliding into place rather than as a train that just reported a position.
+  const pulsedAtRef = useRef(updatedAt);
+
   useEffect(() => {
+    if (pulsedAtRef.current === updatedAt) {
+      return;
+    }
+    pulsedAtRef.current = updatedAt;
+
     firstRing.setValue(0);
     secondRing.setValue(0);
     const animation = RNAnimated.stagger(VEHICLE_PULSE_STAGGER_MS, [
@@ -1883,15 +1907,18 @@ const createStyles = (palette: Palette) => StyleSheet.create({
     fontSize: 13,
     fontWeight: '800',
   },
+  // An opaque fill and a real 1 pt outline: over a map the translucent surface
+  // let the streets underneath through, and a hairline in a surface tone had
+  // nothing to separate the label from whatever it happened to sit on.
   stationNameLabel: {
     maxWidth: 156,
     flexDirection: 'row',
     alignItems: 'center',
     overflow: 'hidden',
     borderRadius: 7,
-    backgroundColor: palette.surfaceTranslucent,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: palette.borderStrong,
+    backgroundColor: palette.surface,
+    borderWidth: 1,
+    borderColor: palette.textMuted,
     paddingHorizontal: 7,
     paddingVertical: 3,
     shadowColor: palette.shadow,
