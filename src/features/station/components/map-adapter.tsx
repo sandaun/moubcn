@@ -1356,7 +1356,18 @@ function VehicleMarker({
   // what `updatedAt` tracks. They run on the native driver and never touch the
   // annotation's coordinate, so an open callout survives them: MapKit only
   // dismisses a callout when the annotation it is attached to moves.
+  //
+  // Not on mount, though: nothing moved, the marker merely appeared, and two
+  // rings expanding around a small tile for two seconds read as the train
+  // sliding into place rather than as a train that just reported a position.
+  const pulsedAtRef = useRef(updatedAt);
+
   useEffect(() => {
+    if (pulsedAtRef.current === updatedAt) {
+      return;
+    }
+    pulsedAtRef.current = updatedAt;
+
     firstRing.setValue(0);
     secondRing.setValue(0);
     const animation = RNAnimated.stagger(VEHICLE_PULSE_STAGGER_MS, [
