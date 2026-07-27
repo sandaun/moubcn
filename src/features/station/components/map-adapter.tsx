@@ -187,6 +187,15 @@ const VEHICLE_SNAP_MAX_DISTANCE_METERS = 150;
 // marker into a permanent animation.
 const VEHICLE_PULSE_RING_MS = 1_600;
 const VEHICLE_PULSE_STAGGER_MS = 500;
+// A vehicle annotation gets placed while the map is still settling — before its
+// React content has a size, and against a projection the camera has not
+// finished animating — which leaves the marker drawn tens of points off the
+// track it snapped to. MapKit re-places an annotation only when its coordinate
+// changes, so the marker sits there until the next feed poll moves it.
+// Alternating this offset on every layout pass and every camera rest makes each
+// of those moments count as a coordinate change. It is about a centimetre on
+// the ground: too small to see, too large to compare equal.
+const VEHICLE_PLACEMENT_NUDGE_DEGREES = 1e-7;
 // How long a map press is still treated as the echo of the vehicle press that
 // produced it, rather than as a tap on empty map meaning "dismiss".
 const VEHICLE_PRESS_ECHO_MS = 350;
@@ -291,6 +300,9 @@ export function MapAdapter({
   const userLocationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [userCoordinate, setUserCoordinate] = useState<LatLng | null>(null);
   const [visibleRegion, setVisibleRegion] = useState<Region | null>(null);
+  // Advances every time the camera comes to rest; vehicle markers use it to
+  // re-place themselves against the projection that is actually on screen.
+  const [placementEpoch, setPlacementEpoch] = useState(0);
   // The vehicle detail is a plain overlay rather than a MapKit Callout. A
   // Callout is presented *inside* the annotation view, and AIRMapMarker then
   // resizes itself from its largest subview — which tore the marker's own
@@ -312,6 +324,7 @@ export function MapAdapter({
   const handleRegionChangeComplete = useCallback((region: Region) => {
     currentRegionRef.current = region;
     setVisibleRegion(region);
+    setPlacementEpoch((current) => current + 1);
   }, []);
 
   const initialRegion = useMemo(() => {
@@ -1048,6 +1061,7 @@ export function MapAdapter({
             color={lineBrand.backgroundColor}
             iconColor={lineBrand.textColor}
             updatedAt={transitVehiclesUpdatedAt}
+            placementEpoch={placementEpoch}
             selected={vehicle.id === selectedVehicleId}
             onPress={() => handleVehiclePress(vehicle.id)}
           />
@@ -1336,6 +1350,7 @@ function VehicleMarker({
   color,
   iconColor,
   updatedAt,
+  placementEpoch,
   selected,
   onPress,
 }: {
@@ -1345,12 +1360,23 @@ function VehicleMarker({
   color: string;
   iconColor: string;
   updatedAt: number;
+  placementEpoch: number;
   selected: boolean;
   onPress: () => void;
 }) {
   const styles = useThemedStyles(createStyles);
   const firstRing = useRef(new RNAnimated.Value(0)).current;
   const secondRing = useRef(new RNAnimated.Value(0)).current;
+  // Counts layout passes of the marker box; see VEHICLE_PLACEMENT_NUDGE_DEGREES
+  // for why every one of them has to alter the coordinate.
+  const [layoutPass, setLayoutPass] = useState(0);
+  const nudged = (layoutPass + placementEpoch) % 2 === 0;
+  const placedCoordinate = nudged
+    ? {
+        latitude: coordinate.latitude + VEHICLE_PLACEMENT_NUDGE_DEGREES,
+        longitude: coordinate.longitude,
+      }
+    : coordinate;
 
   // Two staggered sonar rings fire whenever the feed reports movement, which is
   // what `updatedAt` tracks. They run on the native driver and never touch the
@@ -1411,11 +1437,18 @@ function VehicleMarker({
     <Marker
       accessibilityLabel={accessibilityLabel}
       anchor={STATION_MARKER_ANCHOR}
-      coordinate={coordinate}
+      coordinate={placedCoordinate}
       zIndex={MAP_Z.vehicle}
       onPress={onPress}
     >
-      <View style={styles.vehicleMarkerBox}>
+      {/* Without collapsable={false} React Native flattens this box away and
+          the annotation ends up measured from the rotated heading layer, which
+          drags the marker off the track by the heading tip's own radius. */}
+      <View
+        collapsable={false}
+        style={styles.vehicleMarkerBox}
+        onLayout={() => setLayoutPass((current) => current + 1)}
+      >
         <RNAnimated.View pointerEvents="none" style={ringStyle(firstRing)} />
         <RNAnimated.View pointerEvents="none" style={ringStyle(secondRing)} />
         {/* The detail card sits at the bottom of the screen, so the halo is what
