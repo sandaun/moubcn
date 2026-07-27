@@ -1441,7 +1441,11 @@ function VehicleMarker({
       zIndex={MAP_Z.vehicle}
       onPress={onPress}
     >
+      {/* Without collapsable={false} React Native flattens this box away and
+          the annotation ends up measured from the rotated heading layer, which
+          drags the marker off the track by the heading tip's own radius. */}
       <View
+        collapsable={false}
         style={styles.vehicleMarkerBox}
         onLayout={() => setLayoutPass((current) => current + 1)}
       >
