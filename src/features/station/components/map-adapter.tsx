@@ -1907,15 +1907,18 @@ const createStyles = (palette: Palette) => StyleSheet.create({
     fontSize: 13,
     fontWeight: '800',
   },
+  // An opaque fill and a real 1 pt outline: over a map the translucent surface
+  // let the streets underneath through, and a hairline in a surface tone had
+  // nothing to separate the label from whatever it happened to sit on.
   stationNameLabel: {
     maxWidth: 156,
     flexDirection: 'row',
     alignItems: 'center',
     overflow: 'hidden',
     borderRadius: 7,
-    backgroundColor: palette.surfaceTranslucent,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: palette.borderStrong,
+    backgroundColor: palette.surface,
+    borderWidth: 1,
+    borderColor: palette.textMuted,
     paddingHorizontal: 7,
     paddingVertical: 3,
     shadowColor: palette.shadow,
