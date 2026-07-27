@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { barcelonaWallClockToMs } from '../utils/barcelona-time';
 import {
   applyLineServiceStatus,
-  barcelonaWallClockToMs,
   buildStaticStationsByLine,
   getActiveLineCodesForDate,
   parseLineRecords,

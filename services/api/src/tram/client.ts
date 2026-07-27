@@ -13,6 +13,9 @@ import type {
 } from '../types/api';
 import { tramOAuthClient } from './oauth';
 import { readZipTextFiles } from './zip';
+import { barcelonaWallClockToMs, currentBarcelonaDate } from '../utils/barcelona-time';
+import { asNumber, asString, isRecord } from '../utils/coerce';
+import { getFeedEntities } from '../utils/gtfs-realtime';
 
 const TRAM_MODE = 'tram' as const;
 const TRAM_OPERATOR = 'tram' as const;
@@ -109,21 +112,6 @@ interface GtfsRows {
 const snapshots = new Map<string, CatalogSnapshot>();
 const snapshotFlights = new Map<string, Promise<CatalogSnapshot>>();
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function asString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function asNumber(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value !== 'string' || !value.trim()) return undefined;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
 function parseCsv(text: string): Record<string, unknown>[] {
   const rows = parse(text, {
     bom: true,
@@ -132,47 +120,6 @@ function parseCsv(text: string): Record<string, unknown>[] {
     relax_column_count: true,
   }) as unknown;
   return Array.isArray(rows) ? rows.filter(isRecord) : [];
-}
-
-function currentBarcelonaDate(): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Europe/Madrid',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date());
-}
-
-function barcelonaWallClockToMs(date: string, time: string): number {
-  const [year, month, day] = date.split('-').map(Number);
-  const [hour, minute, second] = time.split(':').map(Number);
-  const targetWallMs = Date.UTC(year, month - 1, day, hour, minute, second);
-  let guess = targetWallMs;
-  const formatter = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Europe/Madrid',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  });
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const parts = Object.fromEntries(
-      formatter.formatToParts(new Date(guess)).map((part) => [part.type, part.value]),
-    );
-    const renderedWallMs = Date.UTC(
-      Number(parts.year),
-      Number(parts.month) - 1,
-      Number(parts.day),
-      parts.hour === '24' ? 0 : Number(parts.hour),
-      Number(parts.minute),
-      Number(parts.second),
-    );
-    guess += targetWallMs - renderedWallMs;
-  }
-  return guess;
 }
 
 function parseStops(rows: Record<string, unknown>[]): Map<string, StopRow> {
@@ -552,10 +499,6 @@ async function loadRealtimeFeed(network: TramNetwork): Promise<Record<string, un
   });
   if (!isRecord(value)) throw new Error('Invalid TRAM realtime feed');
   return value;
-}
-
-function getFeedEntities(feed: Record<string, unknown>): Record<string, unknown>[] {
-  return Array.isArray(feed.entity) ? feed.entity.filter(isRecord) : [];
 }
 
 export function getScheduledArrivals(

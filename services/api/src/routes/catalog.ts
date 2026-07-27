@@ -11,6 +11,7 @@ import {
   getMetroLineStations,
 } from '../tmb/transit-client';
 import type { LineDto, SegmentDto, StationDto } from '../types/api';
+import { currentBarcelonaDate } from '../utils/barcelona-time';
 
 const modeSchema = z.enum(['metro', 'bus', 'fgc', 'tram']);
 const modeParams = z.object({ mode: modeSchema });
@@ -79,15 +80,6 @@ function sourceForMode(mode: 'metro' | 'bus' | 'fgc' | 'tram'): string {
   if (mode === 'fgc') return 'fgc-open-data';
   if (mode === 'tram') return 'tram-open-data';
   return 'tmb-transit';
-}
-
-function currentBarcelonaDate(): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Europe/Madrid',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date());
 }
 
 export const catalogRoutes: FastifyPluginAsync = async (fastify) => {

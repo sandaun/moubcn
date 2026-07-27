@@ -13,6 +13,9 @@ import type {
   TransitVehicleDto,
   VehicleMode,
 } from '../types/api';
+import { barcelonaWallClockToMs, currentBarcelonaDate } from '../utils/barcelona-time';
+import { asNumber, asString, isRecord } from '../utils/coerce';
+import { getFeedEntities } from '../utils/gtfs-realtime';
 
 const FGC_MODE = 'fgc' as const;
 const FGC_OPERATOR = 'fgc' as const;
@@ -99,21 +102,6 @@ interface StaticGtfsRows {
 
 let catalogSnapshot: CatalogSnapshot | null = null;
 let catalogInFlight: Promise<CatalogSnapshot> | null = null;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function asString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function asNumber(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value !== 'string' || !value.trim()) return undefined;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
 
 function asBoolean(value: unknown): boolean | undefined {
   if (value === true || value === 'True' || value === 'true') return true;
@@ -518,19 +506,6 @@ async function loadCatalog(): Promise<CatalogSnapshot> {
   };
 }
 
-function currentBarcelonaDate(): string {
-  const formatter = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Europe/Madrid',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  });
-  const parts = Object.fromEntries(
-    formatter.formatToParts(new Date()).map((part) => [part.type, part.value]),
-  );
-  return `${parts.year}-${parts.month}-${parts.day}`;
-}
-
 async function getCatalog(): Promise<CatalogSnapshot> {
   if (
     catalogSnapshot &&
@@ -572,36 +547,6 @@ async function loadFeed(datasetId: string): Promise<Record<string, unknown>> {
   return value;
 }
 
-export function barcelonaWallClockToMs(date: string, time: string): number {
-  const [year, month, day] = date.split('-').map(Number);
-  const [hour, minute, second] = time.split(':').map(Number);
-  const targetWallMs = Date.UTC(year, month - 1, day, hour, minute, second);
-  let guess = targetWallMs;
-  const formatter = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Europe/Madrid',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  });
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const parts = Object.fromEntries(formatter.formatToParts(new Date(guess)).map((part) => [part.type, part.value]));
-    const renderedWallMs = Date.UTC(
-      Number(parts.year),
-      Number(parts.month) - 1,
-      Number(parts.day),
-      parts.hour === '24' ? 0 : Number(parts.hour),
-      Number(parts.minute),
-      Number(parts.second),
-    );
-    guess += targetWallMs - renderedWallMs;
-  }
-  return guess;
-}
-
 function getScheduledArrivals(
   snapshot: CatalogSnapshot,
   lineCode: string,
@@ -626,10 +571,6 @@ function getScheduledArrivals(
       sourceTimestampMs: nowMs,
       realtimeStatus: 'scheduled',
     }));
-}
-
-function getFeedEntities(feed: Record<string, unknown>): Record<string, unknown>[] {
-  return Array.isArray(feed.entity) ? feed.entity.filter(isRecord) : [];
 }
 
 export async function getFgcLines(): Promise<LineDto[]> {
